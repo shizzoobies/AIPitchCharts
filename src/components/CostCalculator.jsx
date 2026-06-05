@@ -1,54 +1,30 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Users, Zap, Mic, RotateCcw, Info } from "lucide-react";
+import { Users, Mic, RotateCcw, Info, Clock } from "lucide-react";
 import { storage } from "../lib/storage";
+import {
+  PLATFORM_PER_MIN,
+  ELEVENLABS_PLANS,
+  LLM_CATALOG,
+  LLM_RATES,
+  PLAN_ORDER,
+  PROVIDER_ORDER,
+  RECOMMENDED,
+  fmtUSD,
+  fmtUSD2,
+  platformAnnual,
+  llmAnnual,
+} from "../lib/pricing";
 
-// ===== Verified pricing (May 2026) =====
-const ANTHROPIC = {
-  "Opus 4.8":   { in: 5.00, out: 25.00, cached: 0.50 },
-  "Sonnet 4.6": { in: 3.00, out: 15.00, cached: 0.30 },
-  "Haiku 4.5":  { in: 1.00, out: 5.00,  cached: 0.10 },
-};
-const OPENAI = {
-  "GPT-5.5":      { in: 5.00, out: 30.00, cached: 0.50 },
-  "GPT-5.4":      { in: 2.50, out: 15.00, cached: 0.25 },
-  "GPT-5.4 Nano": { in: 0.20, out: 1.25,  cached: 0.02 },
-};
-const ELEVENLABS = {
-  "Creator":   { fee: 22,   rate: 0.30 },
-  "Pro":       { fee: 99,   rate: 0.24 },
-  "Scale":     { fee: 330,  rate: 0.18 },
-  "Business":  { fee: 1320, rate: 0.12 },
-};
-const OPENAI_TTS = {
-  "Standard": 0.015,
-  "HD":       0.030,
-};
-
-const TOKENS = { cachedIn: 1200, freshIn: 300, out: 500 };
-const STORE_KEY = "uhaul:cost-calc:v1";
+const STORE_KEY = "uhaul:cost-calc:v2";
 
 const DEFAULT = {
   eligible: 1150,
   activePct: 40,
-  interactions: 30,
-  voiceScenarios: 800,
-  voiceChars: 3000,
+  conversationsPerUser: 1,
+  avgMinutes: 4,
+  plan: RECOMMENDED.plan,
+  model: RECOMMENDED.model,
 };
-
-function fmtUSD(n) {
-  return "$" + Math.round(n).toLocaleString();
-}
-function fmtUSD2(n) {
-  return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function monthlyTextCost(price, activeUsers, interactionsPerUser) {
-  const total = activeUsers * interactionsPerUser;
-  const cachedCost = (TOKENS.cachedIn * total / 1_000_000) * price.cached;
-  const freshCost = (TOKENS.freshIn * total / 1_000_000) * price.in;
-  const outCost = (TOKENS.out * total / 1_000_000) * price.out;
-  return cachedCost + freshCost + outCost;
-}
 
 export default function CostCalculator() {
   const [state, setState] = useState(DEFAULT);
@@ -71,40 +47,32 @@ export default function CostCalculator() {
   }, [state, loaded]);
 
   const activeUsers = Math.round(state.eligible * (state.activePct / 100));
+  const monthlyMinutes = Math.round(activeUsers * state.conversationsPerUser * state.avgMinutes);
+  const annualMinutes = monthlyMinutes * 12;
 
-  const anthropicAnnual = useMemo(() => {
-    const out = {};
-    for (const [m, p] of Object.entries(ANTHROPIC)) {
-      out[m] = monthlyTextCost(p, activeUsers, state.interactions) * 12;
-    }
-    return out;
-  }, [activeUsers, state.interactions]);
+  const plan = ELEVENLABS_PLANS[state.plan];
+  const includedMin = plan.minutes;
+  const overageMin = Math.max(0, monthlyMinutes - includedMin);
 
-  const openaiAnnual = useMemo(() => {
-    const out = {};
-    for (const [m, p] of Object.entries(OPENAI)) {
-      out[m] = monthlyTextCost(p, activeUsers, state.interactions) * 12;
-    }
-    return out;
-  }, [activeUsers, state.interactions]);
+  // Cost breakdown for the selected plan + selected model.
+  const breakdown = useMemo(() => {
+    const subscriptionAnnual = plan.fee * 12;
+    const overageAnnual = overageMin * PLATFORM_PER_MIN * 12;
+    const platformAnnualCost = subscriptionAnnual + overageAnnual;
+    const rate = LLM_RATES[state.model] ?? 0;
+    const llmAnnualCost = llmAnnual(rate, monthlyMinutes);
+    const totalAnnual = platformAnnualCost + llmAnnualCost;
+    return { subscriptionAnnual, overageAnnual, platformAnnualCost, llmAnnualCost, totalAnnual, rate };
+  }, [state.plan, state.model, monthlyMinutes, overageMin, plan.fee]);
 
-  const voiceAnnual = useMemo(() => {
-    const out = { elevenlabs: {}, openai: {} };
-    const charsPerYear = state.voiceScenarios * state.voiceChars * 12;
-    for (const [plan, p] of Object.entries(ELEVENLABS)) {
-      const usage = (charsPerYear / 1000) * p.rate;
-      const sub = p.fee * 12;
-      out.elevenlabs[plan] = { usage, sub, total: usage + sub };
-    }
-    for (const [tier, rate] of Object.entries(OPENAI_TTS)) {
-      out.openai[tier] = (charsPerYear / 1000) * rate;
-    }
-    return out;
-  }, [state.voiceScenarios, state.voiceChars]);
+  const perUserMonthly = activeUsers > 0 ? breakdown.totalAnnual / 12 / activeUsers : 0;
+  const perMinuteAllIn = monthlyMinutes > 0 ? breakdown.totalAnnual / annualMinutes : 0;
 
-  // Recommended combined: Sonnet 4.6 + ElevenLabs Scale
-  const recommendedAnnual = anthropicAnnual["Sonnet 4.6"] + voiceAnnual.elevenlabs["Scale"].total;
-  const recommendedPerUserMonthly = recommendedAnnual / 12 / activeUsers;
+  // All-in annual cost per model at the selected plan (platform is identical across models).
+  const platformAnnualSelected = breakdown.platformAnnualCost;
+  function modelAnnualAllIn(rate) {
+    return platformAnnualSelected + llmAnnual(rate, monthlyMinutes);
+  }
 
   function reset() {
     setState(DEFAULT);
@@ -113,7 +81,6 @@ export default function CostCalculator() {
   return (
     <div className="min-h-screen" style={{ background: "#FAF8F3", color: "#1A2332", fontFamily: "'Geist', -apple-system, system-ui, sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap');
         .display { font-family: 'Fraunces', Georgia, serif; font-optical-sizing: auto; letter-spacing: -0.02em; }
         .mono { font-family: 'Geist Mono', 'SF Mono', monospace; font-variant-numeric: tabular-nums; }
         input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; height: 24px; }
@@ -137,7 +104,7 @@ export default function CostCalculator() {
                 AI Cost Calculator
               </h1>
               <p className="text-sm" style={{ color: "#6B6256" }}>
-                Adjust the levers below. All annual costs are computed live across providers and tiers.
+                Voice agents run on ElevenLabs Agents. Cost per conversation minute = ${PLATFORM_PER_MIN.toFixed(2)} platform + the LLM rate, billed at cost.
               </p>
             </div>
             <button
@@ -191,181 +158,173 @@ export default function CostCalculator() {
 
           <div className="bg-white p-7 border" style={{ borderColor: "#E5E0D5" }}>
             <div className="flex items-center gap-2 mb-6">
-              <Zap size={16} style={{ color: "#B8865B" }} />
-              <h2 className="mono text-xs tracking-widest uppercase" style={{ color: "#1A2332" }}>Usage intensity</h2>
+              <Mic size={16} style={{ color: "#B8865B" }} />
+              <h2 className="mono text-xs tracking-widest uppercase" style={{ color: "#1A2332" }}>Conversation usage</h2>
             </div>
 
             <div className="mb-6">
               <div className="flex justify-between items-baseline mb-3">
-                <label className="text-sm" style={{ color: "#6B6256" }}>AI interactions per user / month</label>
-                <span className="mono text-2xl font-medium">{state.interactions}</span>
+                <label className="text-sm" style={{ color: "#6B6256" }}>Conversations per user / month</label>
+                <span className="mono text-2xl font-medium">{state.conversationsPerUser}</span>
               </div>
               <input
-                type="range" min="5" max="150" step="5"
-                value={state.interactions}
-                onChange={(e) => setState({ ...state, interactions: +e.target.value })}
+                type="range" min="1" max="30" step="1"
+                value={state.conversationsPerUser}
+                onChange={(e) => setState({ ...state, conversationsPerUser: +e.target.value })}
                 className="w-full"
               />
-              <div className="flex justify-between mono text-xs mt-2" style={{ color: "#6B6256" }}>
-                <span>Light (10)</span><span>Mid (30)</span><span>Heavy (75+)</span>
-              </div>
             </div>
 
             <div className="mb-2">
               <div className="flex justify-between items-baseline mb-3">
-                <label className="text-sm" style={{ color: "#6B6256" }}>Voice scenarios / month (org-wide)</label>
-                <span className="mono text-2xl font-medium">{state.voiceScenarios.toLocaleString()}</span>
+                <label className="text-sm" style={{ color: "#6B6256" }}>Avg minutes per conversation</label>
+                <span className="mono text-2xl font-medium">{state.avgMinutes}</span>
               </div>
               <input
-                type="range" min="0" max="5000" step="50"
-                value={state.voiceScenarios}
-                onChange={(e) => setState({ ...state, voiceScenarios: +e.target.value })}
+                type="range" min="1" max="20" step="1"
+                value={state.avgMinutes}
+                onChange={(e) => setState({ ...state, avgMinutes: +e.target.value })}
                 className="w-full"
               />
+              <div className="mono text-xs mt-2" style={{ color: "#B8865B" }}>
+                = {monthlyMinutes.toLocaleString()} conversation minutes / month
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Recommended combo */}
+        {/* Plan selector */}
+        <div className="mb-10">
+          <div className="mono text-xs uppercase tracking-widest mb-3" style={{ color: "#6B6256" }}>ElevenLabs Agents plan</div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+            {PLAN_ORDER.map((key) => {
+              const p = ELEVENLABS_PLANS[key];
+              const sel = state.plan === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => setState({ ...state, plan: key })}
+                  className="text-left p-4 border transition-colors"
+                  style={{
+                    borderColor: sel ? "#1A2332" : "#E5E0D5",
+                    background: sel ? "#FAF6EE" : "white",
+                  }}
+                >
+                  <div className="text-sm font-medium mb-1">{key}</div>
+                  <div className="mono text-xs" style={{ color: "#B8865B" }}>{p.fee === 0 ? "Free" : "$" + p.fee + "/mo"}</div>
+                  <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>{p.minutes.toLocaleString()} min</div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-2 mono text-xs mt-3" style={{ color: monthlyMinutes > includedMin ? "#9B2D2D" : "#1E7A46" }}>
+            <Clock size={12} />
+            {monthlyMinutes.toLocaleString()} / {includedMin.toLocaleString()} included min used
+            {overageMin > 0
+              ? ` · ${overageMin.toLocaleString()} min overage @ $${PLATFORM_PER_MIN.toFixed(2)}/min`
+              : " · within plan"}
+          </div>
+        </div>
+
+        {/* Recommended / selected combo */}
         <div className="mb-10 p-8 border-2" style={{ borderColor: "#1A2332", background: "#FFFFFF" }}>
           <div className="flex items-baseline justify-between flex-wrap gap-4 mb-2">
             <div className="mono text-xs tracking-widest uppercase" style={{ color: "#B8865B" }}>
-              Recommended configuration
+              {state.plan === RECOMMENDED.plan && state.model === RECOMMENDED.model ? "Recommended configuration" : "Selected configuration"}
             </div>
-            <div className="text-sm" style={{ color: "#6B6256" }}>Sonnet 4.6 + ElevenLabs Scale</div>
+            <div className="text-sm" style={{ color: "#6B6256" }}>ElevenLabs {state.plan} + {state.model}</div>
           </div>
-          <div className="grid grid-cols-3 gap-8 mt-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mt-4">
             <div>
-              <div className="text-xs mb-2" style={{ color: "#6B6256" }}>Annual platform cost</div>
-              <div className="display text-4xl font-medium mono">{fmtUSD(recommendedAnnual)}</div>
+              <div className="text-xs mb-2" style={{ color: "#6B6256" }}>Annual all-in cost</div>
+              <div className="display text-4xl font-medium mono">{fmtUSD(breakdown.totalAnnual)}</div>
             </div>
             <div>
               <div className="text-xs mb-2" style={{ color: "#6B6256" }}>Per active user / month</div>
-              <div className="display text-4xl font-medium mono">{fmtUSD2(recommendedPerUserMonthly)}</div>
+              <div className="display text-4xl font-medium mono">{fmtUSD2(perUserMonthly)}</div>
+            </div>
+            <div>
+              <div className="text-xs mb-2" style={{ color: "#6B6256" }}>Per conversation minute</div>
+              <div className="display text-4xl font-medium mono">{fmtUSD2(perMinuteAllIn)}</div>
             </div>
             <div>
               <div className="text-xs mb-2" style={{ color: "#6B6256" }}>Per active user / year</div>
-              <div className="display text-4xl font-medium mono">{fmtUSD(recommendedAnnual / activeUsers)}</div>
+              <div className="display text-4xl font-medium mono">{activeUsers > 0 ? fmtUSD(breakdown.totalAnnual / activeUsers) : "$0"}</div>
+            </div>
+          </div>
+
+          {/* Breakdown bar */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-px mt-8" style={{ background: "#E5E0D5", border: "1px solid #E5E0D5" }}>
+            <div className="bg-white p-4">
+              <div className="text-xs mb-1" style={{ color: "#6B6256" }}>Platform subscription</div>
+              <div className="mono text-xl font-medium">{fmtUSD(breakdown.subscriptionAnnual)}</div>
+              <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>${plan.fee}/mo × 12</div>
+            </div>
+            <div className="bg-white p-4">
+              <div className="text-xs mb-1" style={{ color: "#6B6256" }}>Platform overage</div>
+              <div className="mono text-xl font-medium">{fmtUSD(breakdown.overageAnnual)}</div>
+              <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>{overageMin.toLocaleString()} min/mo × ${PLATFORM_PER_MIN.toFixed(2)}</div>
+            </div>
+            <div className="bg-white p-4">
+              <div className="text-xs mb-1" style={{ color: "#6B6256" }}>LLM at cost</div>
+              <div className="mono text-xl font-medium">{fmtUSD(breakdown.llmAnnualCost)}</div>
+              <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>{annualMinutes.toLocaleString()} min/yr × ${breakdown.rate.toFixed(4)}</div>
             </div>
           </div>
         </div>
 
-        {/* Text AI Comparison */}
-        <h2 className="display text-2xl font-medium mb-5 mt-12" style={{ color: "#1A2332" }}>
-          Text guidance · annual cost by provider and tier
+        {/* LLM comparison */}
+        <h2 className="display text-2xl font-medium mb-2 mt-12" style={{ color: "#1A2332" }}>
+          LLM choice · annual all-in cost
         </h2>
+        <p className="text-sm mb-5" style={{ color: "#6B6256" }}>
+          On the ElevenLabs <strong>{state.plan}</strong> plan at {monthlyMinutes.toLocaleString()} min/month. Click any model to make it the selected configuration. Platform cost ({fmtUSD(platformAnnualSelected)}/yr) is identical across models — only the LLM portion changes.
+        </p>
         <div className="grid md:grid-cols-2 gap-6 mb-10">
-          <div className="bg-white border" style={{ borderColor: "#E5E0D5" }}>
-            <div className="px-6 py-4 border-b mono text-xs tracking-widest uppercase" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
-              Anthropic Claude
-            </div>
-            <div>
-              {Object.entries(anthropicAnnual).map(([model, cost], i) => (
-                <div key={model}
-                  className="flex justify-between items-baseline px-6 py-4 border-b last:border-b-0"
-                  style={{
-                    borderColor: "#E5E0D5",
-                    background: model === "Sonnet 4.6" ? "#FAF6EE" : "transparent",
-                  }}
-                >
-                  <div>
-                    <div className="text-sm font-medium" style={{ color: "#1A2332" }}>{model}</div>
-                    <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>
-                      ${ANTHROPIC[model].in.toFixed(2)} in / ${ANTHROPIC[model].out.toFixed(2)} out per 1M tokens
-                    </div>
-                  </div>
-                  <div className="mono text-2xl font-medium">{fmtUSD(cost)}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="bg-white border" style={{ borderColor: "#E5E0D5" }}>
-            <div className="px-6 py-4 border-b mono text-xs tracking-widest uppercase" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
-              OpenAI
-            </div>
-            <div>
-              {Object.entries(openaiAnnual).map(([model, cost], i) => (
-                <div key={model}
-                  className="flex justify-between items-baseline px-6 py-4 border-b last:border-b-0"
-                  style={{
-                    borderColor: "#E5E0D5",
-                    background: model === "GPT-5.4" ? "#FAF6EE" : "transparent",
-                  }}
-                >
-                  <div>
-                    <div className="text-sm font-medium" style={{ color: "#1A2332" }}>{model}</div>
-                    <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>
-                      ${OPENAI[model].in.toFixed(2)} in / ${OPENAI[model].out.toFixed(2)} out per 1M tokens
-                    </div>
-                  </div>
-                  <div className="mono text-2xl font-medium">{fmtUSD(cost)}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Voice */}
-        <h2 className="display text-2xl font-medium mb-5" style={{ color: "#1A2332" }}>
-          Voice scenarios · annual cost
-        </h2>
-        <div className="grid md:grid-cols-2 gap-6 mb-10">
-          <div className="bg-white border" style={{ borderColor: "#E5E0D5" }}>
-            <div className="px-6 py-4 border-b mono text-xs tracking-widest uppercase" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
-              ElevenLabs
-            </div>
-            {Object.entries(voiceAnnual.elevenlabs).map(([plan, costs]) => (
-              <div key={plan}
-                className="flex justify-between items-baseline px-6 py-4 border-b last:border-b-0"
-                style={{
-                  borderColor: "#E5E0D5",
-                  background: plan === "Scale" ? "#FAF6EE" : "transparent",
-                }}
-              >
-                <div>
-                  <div className="text-sm font-medium" style={{ color: "#1A2332" }}>{plan}</div>
-                  <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>
-                    ${ELEVENLABS[plan].rate.toFixed(2)} / 1k chars · ${ELEVENLABS[plan].fee}/mo sub
-                  </div>
-                </div>
-                <div className="mono text-2xl font-medium">{fmtUSD(costs.total)}</div>
+          {PROVIDER_ORDER.map((provider) => (
+            <div key={provider} className="bg-white border" style={{ borderColor: "#E5E0D5" }}>
+              <div className="px-6 py-4 border-b mono text-xs tracking-widest uppercase" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
+                {provider}
               </div>
-            ))}
-          </div>
-
-          <div className="bg-white border" style={{ borderColor: "#E5E0D5" }}>
-            <div className="px-6 py-4 border-b mono text-xs tracking-widest uppercase" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
-              OpenAI TTS (budget fallback)
-            </div>
-            {Object.entries(voiceAnnual.openai).map(([tier, cost]) => (
-              <div key={tier}
-                className="flex justify-between items-baseline px-6 py-4 border-b last:border-b-0"
-                style={{ borderColor: "#E5E0D5" }}
-              >
-                <div>
-                  <div className="text-sm font-medium" style={{ color: "#1A2332" }}>{tier}</div>
-                  <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>
-                    ${OPENAI_TTS[tier].toFixed(3)} / 1k chars
-                  </div>
-                </div>
-                <div className="mono text-2xl font-medium">{fmtUSD(cost)}</div>
+              <div>
+                {Object.entries(LLM_CATALOG[provider]).map(([model, info]) => {
+                  const sel = state.model === model;
+                  return (
+                    <button
+                      key={model}
+                      onClick={() => setState({ ...state, model })}
+                      className="w-full text-left flex justify-between items-baseline px-6 py-4 border-b last:border-b-0 transition-colors hover:bg-[#FAF6EE]"
+                      style={{
+                        borderColor: "#E5E0D5",
+                        background: sel ? "#FAF6EE" : "transparent",
+                      }}
+                    >
+                      <div>
+                        <div className="text-sm font-medium flex items-center gap-2" style={{ color: "#1A2332" }}>
+                          {model}
+                          {sel && <span className="mono text-xs px-2 py-0.5" style={{ background: "#1A2332", color: "#FAF8F3", borderRadius: 2 }}>Selected</span>}
+                        </div>
+                        <div className="mono text-xs mt-1" style={{ color: "#6B6256" }}>
+                          ${info.rate.toFixed(4)}/min LLM · {info.note}
+                        </div>
+                      </div>
+                      <div className="mono text-2xl font-medium">{fmtUSD(modelAnnualAllIn(info.rate))}</div>
+                    </button>
+                  );
+                })}
               </div>
-            ))}
-            <div className="px-6 py-5 text-xs" style={{ color: "#6B6256", background: "#FAF6EE", borderTop: "1px solid #E5E0D5" }}>
-              <Info size={12} style={{ display: "inline", verticalAlign: "-1px", marginRight: "6px" }} />
-              ElevenLabs delivers far more realistic voice. OpenAI TTS serves as the automatic budget fallback inside graceful degradation.
             </div>
-          </div>
+          ))}
         </div>
 
         {/* Assumptions footer */}
         <div className="mt-12 pt-6 border-t text-xs leading-relaxed" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
           <div className="mono text-xs tracking-widest uppercase mb-3" style={{ color: "#1A2332" }}>Modeling assumptions</div>
+          <p className="mb-2">
+            All voice and text guidance runs through ElevenLabs Agents. The platform fee is a flat ${PLATFORM_PER_MIN.toFixed(2)} per conversation minute; each plan's included minutes prepay that fee, and minutes beyond the allotment bill at the same ${PLATFORM_PER_MIN.toFixed(2)}/min. The LLM is billed separately at cost using the per-minute rates shown above.
+          </p>
           <p>
-            Per interaction: {TOKENS.cachedIn} cached input tokens (system prompt + training context, billed at 10% rate), {TOKENS.freshIn} fresh input tokens (user question), {TOKENS.out} output tokens.
-            Per voice scenario: {state.voiceChars.toLocaleString()} characters of spoken audio.
-            All pricing verified May 2026 from official vendor sources. Prompt caching assumed active across all providers.
+            Monthly minutes = active users × conversations per user × average minutes per conversation = {activeUsers.toLocaleString()} × {state.conversationsPerUser} × {state.avgMinutes} = {monthlyMinutes.toLocaleString()} min. LLM and platform pricing verified June 2026 from official ElevenLabs sources.
           </p>
         </div>
 

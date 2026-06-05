@@ -41,7 +41,7 @@ const DEFAULT = {
   annualInteractions: PRESETS.truckRental.annualInteractions,
   avgValue: PRESETS.truckRental.avgValue,
   baselineRate: PRESETS.truckRental.baselineRate,
-  platformCost: 24000,
+  platformCost: 6000,
 };
 
 const LIFT_LEVELS = [0.5, 1, 2, 3, 5, 7];
@@ -234,13 +234,13 @@ export default function ROIModel() {
               <span className="mono text-2xl font-medium">{fmtUSDFull(state.platformCost)}</span>
             </div>
             <input
-              type="range" min="5000" max="60000" step="1000"
+              type="range" min="2000" max="40000" step="500"
               value={state.platformCost}
               onChange={(e) => setState({ ...state, platformCost: +e.target.value })}
               className="w-full"
             />
             <div className="flex justify-between mono text-xs mt-2" style={{ color: "#6B6256" }}>
-              <span>$5K</span><span>Recommended envelope $24K-$36K</span><span>$60K</span>
+              <span>$2K</span><span>ElevenLabs Agents envelope $4K-$12K</span><span>$40K</span>
             </div>
           </div>
         </div>
@@ -361,7 +361,7 @@ export default function ROIModel() {
         <div className="pt-6 border-t text-xs leading-relaxed" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
           <div className="mono text-xs tracking-widest uppercase mb-3" style={{ color: "#1A2332" }}>Methodology notes</div>
           <p className="mb-2">
-            Preset values for interaction volume, average value, and baseline conversion are illustrative starting points. Replace them with U-Haul's actual figures for a precise model. The platform cost slider reflects the recommended annual envelope.
+            Preset values for interaction volume, average value, and baseline conversion are illustrative starting points. Replace them with U-Haul's actual figures for a precise model. The platform cost slider reflects the annual ElevenLabs Agents envelope (subscription + platform minutes + LLM at cost) modeled in the Cost Calculator.
           </p>
           <p className="mb-2">
             Performance lift is shown as additional percentage points on the baseline conversion rate. A 3% lift on a 55% baseline means the new rate is 58%, not 56.65%.

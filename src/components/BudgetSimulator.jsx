@@ -2,30 +2,55 @@ import React, { useState, useEffect, useMemo } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ResponsiveContainer, Area, ComposedChart } from "recharts";
 import { Activity, AlertTriangle, CheckCircle2, RotateCcw, Zap, Gauge } from "lucide-react";
 import { storage } from "../lib/storage";
+import { PLATFORM_PER_MIN } from "../lib/pricing";
 
 const DAYS = 30;
-const STORE_KEY = "uhaul:burndown:v1";
+const STORE_KEY = "uhaul:burndown:v2";
 
-// Cost multipliers normalized to Opus = 1.0 (from verified pricing)
-const PROVIDERS = {
+// All-in cost per conversation minute = $0.080 platform floor + LLM rate (at cost).
+// LLM per-minute rates verified June 2026 from the ElevenLabs Agents model picker.
+function tier(name, llmRate, color) {
+  return { name, llmRate, costPerMin: PLATFORM_PER_MIN + llmRate, color };
+}
+
+const RAW_PROVIDERS = {
   anthropic: {
     label: "Anthropic Claude",
-    tiers: {
-      premium: { name: "Opus 4.8",    multiplier: 1.00, color: "#534AB7" },
-      mid:     { name: "Sonnet 4.6",  multiplier: 0.58, color: "#1E7A46" },
-      budget:  { name: "Haiku 4.5",   multiplier: 0.19, color: "#B8865B" },
-    },
+    premium: tier("Opus 4.7",   0.1369, "#534AB7"),
+    mid:     tier("Sonnet 4.6", 0.0822, "#1E7A46"),
+    budget:  tier("Haiku 4.5",  0.0274, "#B8865B"),
   },
   openai: {
     label: "OpenAI",
-    tiers: {
-      premium: { name: "GPT-5.5",      multiplier: 1.00, color: "#534AB7" },
-      mid:     { name: "GPT-5.4",      multiplier: 0.50, color: "#1E7A46" },
-      budget:  { name: "GPT-5.4 Nano", multiplier: 0.05, color: "#B8865B" },
-    },
+    premium: tier("GPT-5.5",      0.1384, "#534AB7"),
+    mid:     tier("GPT-5.4",      0.0692, "#1E7A46"),
+    budget:  tier("GPT-5.4 Nano", 0.0056, "#B8865B"),
+  },
+  google: {
+    label: "Google Gemini",
+    premium: tier("Gemini 3.1 Pro",   0.0554, "#534AB7"),
+    mid:     tier("Gemini 3.5 Flash", 0.0415, "#1E7A46"),
+    budget:  tier("Gemini 2.5 Flash", 0.0041, "#B8865B"),
   },
 };
-const FALLBACK = { name: "FAQ only", multiplier: 0, color: "#6B6256" };
+
+// Derive sim multipliers (relative to each provider's premium all-in cost).
+const PROVIDERS = Object.fromEntries(
+  Object.entries(RAW_PROVIDERS).map(([key, p]) => {
+    const base = p.premium.costPerMin;
+    const withMult = (t) => ({ ...t, multiplier: t.costPerMin / base });
+    return [key, {
+      label: p.label,
+      tiers: {
+        premium: withMult(p.premium),
+        mid: withMult(p.mid),
+        budget: withMult(p.budget),
+      },
+    }];
+  })
+);
+
+const FALLBACK = { name: "FAQ only", multiplier: 0, costPerMin: 0, color: "#6B6256" };
 
 const PRESETS = {
   light:  { label: "Quiet month",   demand: 70,  desc: "Light usage, budget unused" },
@@ -35,7 +60,7 @@ const PRESETS = {
 };
 
 const DEFAULT = {
-  budget: 2500,
+  budget: 600,
   demand: 115,
   t1: 40,
   t2: 75,
@@ -111,7 +136,6 @@ export default function BudgetSimulator() {
   return (
     <div className="min-h-screen" style={{ background: "#FAF8F3", color: "#1A2332", fontFamily: "'Geist', -apple-system, system-ui, sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap');
         .display { font-family: 'Fraunces', Georgia, serif; font-optical-sizing: auto; letter-spacing: -0.02em; }
         .mono { font-family: 'Geist Mono', 'SF Mono', monospace; font-variant-numeric: tabular-nums; }
         input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; height: 24px; }
@@ -131,7 +155,7 @@ export default function BudgetSimulator() {
             </div>
             <h1 className="display text-5xl font-medium mb-2">Budget Tiering Simulator</h1>
             <p className="text-sm" style={{ color: "#6B6256" }}>
-              Watch the platform downshift through model tiers as cumulative spend approaches the monthly ceiling.
+              Watch the agent downshift through LLM tiers as monthly spend approaches the ceiling. Each minute costs ${PLATFORM_PER_MIN.toFixed(2)} platform plus the LLM rate.
             </p>
           </div>
           <button
@@ -240,7 +264,7 @@ export default function BudgetSimulator() {
           <div className="text-sm leading-relaxed">
             {underBudget
               ? <>Within budget. Projected {fmtUSD(sim.projected)} of {fmtUSD(state.budget)} ({usedPct}% used). The system stepped down through {sim.switches.length} tier {sim.switches.length === 1 ? "switch" : "switches"} to stay under the ceiling.</>
-              : <>Demand exceeds what tiering alone absorbs. Projected {fmtUSD(sim.projected)} of {fmtUSD(state.budget)} ({usedPct}% used). Lower the Haiku threshold so the FAQ fallback engages sooner, or raise the budget.</>}
+              : <>Demand exceeds what LLM tiering alone absorbs. Projected {fmtUSD(sim.projected)} of {fmtUSD(state.budget)} ({usedPct}% used). Because the ${PLATFORM_PER_MIN.toFixed(2)}/min platform fee is a fixed floor, the FAQ fallback (zero cost, no call) is the real hard stop — lower the budget-tier threshold so it engages sooner, or raise the budget.</>}
           </div>
         </div>
 
@@ -281,7 +305,7 @@ export default function BudgetSimulator() {
                 <span className="mono text-2xl font-medium">{fmtUSD(state.budget)}</span>
               </div>
               <input
-                type="range" min="1000" max="5000" step="100"
+                type="range" min="200" max="3000" step="50"
                 value={state.budget}
                 onChange={(e) => setState({ ...state, budget: +e.target.value })}
                 className="w-full"
@@ -333,7 +357,7 @@ export default function BudgetSimulator() {
               </div>
             ))}
             <div className="mt-4 pt-4 text-xs leading-relaxed border-t" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
-              Past the {state.t3}% mark, the platform serves curated FAQ content with no API cost until the next billing cycle resets.
+              Past the {state.t3}% mark, the platform serves curated FAQ content with no agent call and no API cost until the next billing cycle resets.
             </div>
           </div>
         </div>
@@ -341,13 +365,14 @@ export default function BudgetSimulator() {
         {/* Provider toggle */}
         <div className="bg-white p-7 border mb-8" style={{ borderColor: "#E5E0D5" }}>
           <div className="mono text-xs uppercase tracking-widest mb-4" style={{ color: "#6B6256" }}>Provider routing</div>
-          <div className="flex gap-3">
+          <div className="flex gap-3 flex-wrap">
             {Object.entries(PROVIDERS).map(([key, p]) => (
               <button
                 key={key}
                 onClick={() => setState({ ...state, provider: key })}
                 className="flex-1 p-4 border text-left transition-colors"
                 style={{
+                  minWidth: 180,
                   borderColor: state.provider === key ? "#1A2332" : "#E5E0D5",
                   background: state.provider === key ? "#FAF6EE" : "white",
                 }}
@@ -360,7 +385,7 @@ export default function BudgetSimulator() {
             ))}
           </div>
           <div className="text-xs mt-4 leading-relaxed" style={{ color: "#6B6256" }}>
-            The platform routes between both providers in production. This toggle shows how either looks under the same budget rules. Switching providers does not change behavior, only which model names appear in the tiers.
+            ElevenLabs Agents lets you route to any of these LLMs. This toggle shows how each provider's premium / mid / budget tiers behave under the same budget rules. Switching providers changes which model names and per-minute rates appear in the tiers.
           </div>
         </div>
 
@@ -368,15 +393,16 @@ export default function BudgetSimulator() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-10">
           {[
             { ...tiers.premium, key: "premium", desc: "Highest reasoning quality" },
-            { ...tiers.mid,     key: "mid",     desc: "Near-premium, ~58% cost" },
-            { ...tiers.budget,  key: "budget",  desc: "Budget tier, ~19% cost" },
-            { ...FALLBACK,      key: "fallback", desc: "Zero API cost, curated FAQ" },
+            { ...tiers.mid,     key: "mid",     desc: "Near-premium, lower LLM rate" },
+            { ...tiers.budget,  key: "budget",  desc: "Budget LLM, platform fee dominates" },
+            { ...FALLBACK,      key: "fallback", desc: "No call placed · zero cost" },
           ].map((t) => (
             <div key={t.key} className="p-4 border bg-white" style={{ borderColor: "#E5E0D5" }}>
               <div className="flex items-center gap-2 mb-2">
                 <span style={{ width: 10, height: 10, background: t.color, borderRadius: 2 }} />
                 <div className="text-sm font-medium">{t.name}</div>
               </div>
+              <div className="mono text-xs mb-1" style={{ color: "#B8865B" }}>${t.costPerMin.toFixed(4)}/min all-in</div>
               <div className="text-xs leading-relaxed" style={{ color: "#6B6256" }}>{t.desc}</div>
             </div>
           ))}
@@ -385,7 +411,10 @@ export default function BudgetSimulator() {
         <div className="pt-6 border-t text-xs leading-relaxed" style={{ borderColor: "#E5E0D5", color: "#6B6256" }}>
           <div className="mono text-xs tracking-widest uppercase mb-3" style={{ color: "#1A2332" }}>How to read this</div>
           <p className="mb-2">
-            Each day adds spend to the running total. The system checks the percentage of the monthly budget consumed and selects which model tier to use for new requests. As cumulative spend climbs through the thresholds, it downshifts: premium first, then mid, then budget, then the zero-cost FAQ fallback.
+            Each day adds spend to the running total. The system checks the percentage of the monthly budget consumed and selects which LLM tier to use for new conversations. As cumulative spend climbs through the thresholds, it downshifts: premium first, then mid, then budget, then the zero-cost FAQ fallback.
+          </p>
+          <p className="mb-2">
+            Note the economics of ElevenLabs Agents: every conversation minute carries a fixed ${PLATFORM_PER_MIN.toFixed(2)} platform fee, so swapping to a cheaper LLM only trims the smaller LLM portion. The dramatic savings come from the FAQ fallback, which places no call at all.
           </p>
           <p>
             The flattening of the line at each tier switch is the budget protection happening automatically. No human intervention required.
